@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {"id":"user_temp","name":"用户临时文件（超过 7 天）","category":"SYSTEM","paths":["%TEMP%"],"risk_level":"CAUTION","min_age_hours":168,"selected_by_default":false,"description":"仅列出超过七天未修改的临时文件；请先关闭应用，默认不勾选。"},
+    {"id":"chrome_cache","name":"Chrome 网页资源缓存","category":"BROWSER","paths":["%LOCALAPPDATA%/Google/Chrome/User Data/Default/Cache/Cache_Data","%LOCALAPPDATA%/Google/Chrome/User Data/Profile */Cache/Cache_Data"],"risk_level":"SAFE","min_age_hours":24,"selected_by_default":true,"description":"清理超过一天的网页资源缓存，页面需重新加载；不匹配密码、Cookie 和历史记录。请先关闭浏览器。"},
+    {"id":"edge_cache","name":"Edge 网页资源缓存","category":"BROWSER","paths":["%LOCALAPPDATA%/Microsoft/Edge/User Data/Default/Cache/Cache_Data","%LOCALAPPDATA%/Microsoft/Edge/User Data/Profile */Cache/Cache_Data"],"risk_level":"SAFE","min_age_hours":24,"selected_by_default":true,"description":"清理网页资源缓存，不匹配账号、Cookie、收藏夹及历史记录。请先关闭浏览器。"},
+    {"id":"firefox_cache","name":"Firefox 网页缓存","category":"BROWSER","paths":["%LOCALAPPDATA%/Mozilla/Firefox/Profiles/*/cache2/entries"],"risk_level":"SAFE","min_age_hours":24,"selected_by_default":true,"description":"仅匹配 cache2 缓存条目，页面资源需要重新下载。请先关闭浏览器。"},
+    {"id":"pip_cache","name":"pip 下载缓存","category":"DEVELOPER","paths":["%LOCALAPPDATA%/pip/Cache/http-v2","%LOCALAPPDATA%/pip/Cache/wheels"],"risk_level":"SAFE","min_age_hours":168,"selected_by_default":true,"description":"清理超过七天的下载及构建缓存，不删除已安装包；离线安装可能需要这些缓存。"},
+    {"id":"npm_cache","name":"npm 下载缓存","category":"DEVELOPER","paths":["%LOCALAPPDATA%/npm-cache/_cacache"],"risk_level":"CAUTION","min_age_hours":168,"selected_by_default":false,"description":"下次安装需要重新下载；离线项目请保留，执行前结束包管理任务。"},
+    {"id":"wechat_legacy_cache","name":"微信旧版 FileStorage 缓存","category":"SOCIAL_OFFICE","paths":["%USERPROFILE%/Documents/WeChat Files/*/FileStorage/Cache"],"risk_level":"CAUTION","min_age_hours":168,"selected_by_default":false,"description":"仅匹配旧版 Cache 目录，不匹配聊天数据库和接收文件。版本布局不同则跳过；先退出微信并确认备份。"}
+  ]
+}
