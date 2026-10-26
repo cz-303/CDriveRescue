@@ -1,0 +1,18 @@
+# CDriveRescue (C盘焦虑拯救者) 依赖清单
+# Python >= 3.11
+
+# 核心系统监控与磁盘/进程占用分析 (Gemini & GPT 共用)
+psutil>=5.9.8
+
+# 安全回收站隔离清理支持 (GPT CacheCleaner 使用)
+Send2Trash>=1.8.3
+
+# 现代化桌面 UI 框架 (Claude UI 层使用)
+PyQt6>=6.6.0
+
+# Windows 原生 API 增强 (可选，仅在 Windows 下安装)
+pywin32>=306; platform_system == "Windows"
+
+# 自动化测试与打包工具
+pytest>=8.0.0
+pyinstaller>=6.5.0
