@@ -1,14 +1,3 @@
-# CDriveRescue · C盘焦虑拯救者 (v1.1)
-
-[[https://github.com/cz-303/CDriveRescue/actions/workflows/ci.yml/badge.svg]](https://github.com/cz-303/CDriveRescue/actions/workflows/ci.yml)
-[https://img.shields.io/badge/Platform-Windows%2010%2F11%20(NTFS]-0078D6)
-[https://img.shields.io/badge/Python-3.11%2B-3776AB]
-[https://img.shields.io/badge/Tests-123%20Passed-2F8F5B]
-
-> **Gemini（架构与安全底座）× GPT（NTFS 事务引擎）× Claude（PyQt6 治愈系交互）** 联合打造的 Windows C 盘无损瘦身与软件搬家工具。
-
-[docs/CDriveRescue_Preview.gif]
-
 # CDriveRescue · C盘焦虑拯救者
 
 Windows 桌面磁盘工具：看清 C 盘为什么满、保守地清理缓存，并把大文件夹迁移到其他磁盘（先完整复制并校验；原位置留下目录联接，软件照常找得到）。
