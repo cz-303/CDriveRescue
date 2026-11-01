@@ -1,5 +1,16 @@
 # CDriveRescue · C盘焦虑拯救者
 
+[![最新版本](https://img.shields.io/github/v/release/cz-303/CDriveRescue?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/cz-303/CDriveRescue/releases/latest)
+[![下载次数](https://img.shields.io/github/downloads/cz-303/CDriveRescue/total?label=%E4%B8%8B%E8%BD%BD)](https://github.com/cz-303/CDriveRescue/releases)
+[![许可证](https://img.shields.io/github/license/cz-303/CDriveRescue?label=%E8%AE%B8%E5%8F%AF%E8%AF%81)](LICENSE)
+![平台](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%2010%20%7C%2011-0078D6)
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![PyQt6](https://img.shields.io/badge/UI-PyQt6-41CD52?logo=qt&logoColor=white)
+
+![CDriveRescue 界面预览](docs/images/preview.gif)
+
+<sub>界面预览（示例数据）：C 盘体检、缓存清理、大文件猎手、软件搬家、迁移记录、深水区瘦身实验室。</sub>
+
 Windows 桌面磁盘工具：看清 C 盘为什么满、保守地清理缓存，并把大文件夹迁移到其他磁盘（先完整复制并校验；原位置留下目录联接，软件照常找得到）。
 
 ## 下载
