@@ -170,3 +170,47 @@ QToolTip {
     border: none;
     padding: 6px 8px;
 }
+
+/* ---------- v1.1 实验室 ---------- */
+#pill_info, #pill_safe, #pill_caution, #pill_danger, #pill_muted {
+    border-radius: 9px;
+    padding: 2px 9px;
+    font-size: 12px;
+    font-weight: 600;
+}
+#pill_info    { background: #E1EEF0; color: #1F6F78; }
+#pill_safe    { background: #E2F2E8; color: #2F8F5B; }
+#pill_caution { background: #FBEFD5; color: #A87008; }
+#pill_danger  { background: #F8E1DE; color: #C9473D; }
+#pill_muted   { background: #EFECE6; color: #6B7378; }
+
+#segmented {
+    background: #ECE7DE;
+    border-radius: 10px;
+}
+QPushButton#segment {
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 16px;
+    color: #4A5458;
+}
+QPushButton#segment:hover { background: #E2DCD1; }
+QPushButton#segment:checked {
+    background: #FFFFFF;
+    color: #1F2A2E;
+    font-weight: 600;
+}
+
+#folderCard {
+    background: #FFFFFF;
+    border: 1px solid #E6E1D8;
+    border-radius: 12px;
+}
+#statValueSmall { font-size: 16px; font-weight: 600; }
+
+QPushButton#smallButton {
+    padding: 3px 10px;
+    font-size: 12px;
+    border-radius: 6px;
+}

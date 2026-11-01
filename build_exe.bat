@@ -33,16 +33,27 @@ if /i "%~1"=="--cli" (
 "%PY%" verify_build.py preflight %MODE%
 if errorlevel 1 exit /b 1
 
-if exist "dist\%NAME%" rmdir /s /q "dist\%NAME%"
+rem Keep the previous build as a rollback copy instead of deleting it.
+if exist "dist\%NAME%" (
+  if exist "dist\%NAME%_prev" rmdir /s /q "dist\%NAME%_prev"
+  move "dist\%NAME%" "dist\%NAME%_prev" >nul
+  if errorlevel 1 (
+    echo [ERROR] Could not keep the previous build as dist\%NAME%_prev. Close any running copy and retry.
+    exit /b 1
+  )
+  echo Previous build kept as dist\%NAME%_prev
+)
 if exist "build\%NAME%" rmdir /s /q "build\%NAME%"
+"%PY%" verify_build.py version-file %MODE%
+if errorlevel 1 exit /b 1
 if "%MODE%"=="cli" goto cli
 
-"%PY%" -m PyInstaller --noconfirm --clean --windowed --name CDriveRescue --icon "src\ui\assets\app.ico" --hidden-import src.core.cache_cleaner --hidden-import src.core.app_mover --hidden-import src.ui.main_window --hidden-import psutil --collect-all PyQt6 --collect-all send2trash --add-data "src/core/cache_rules.json;src/core" --add-data "src/ui/theme.qss;src/ui" --add-data "src/ui/assets;src/ui/assets" main.py
+"%PY%" -m PyInstaller --noconfirm --clean --windowed --name CDriveRescue --version-file "build\version_info_CDriveRescue.txt" --icon "src\ui\assets\app.ico" --hidden-import src.core.cache_cleaner --hidden-import src.core.app_mover --hidden-import src.core.system_optimizer --hidden-import src.ui.main_window --hidden-import src.ui.lab_page --hidden-import psutil --collect-all PyQt6 --collect-all send2trash --add-data "src/core/cache_rules.json;src/core" --add-data "src/ui/theme.qss;src/ui" --add-data "src/ui/assets;src/ui/assets" main.py
 if errorlevel 1 exit /b 1
 goto verify
 
 :cli
-"%PY%" -m PyInstaller --noconfirm --clean --console --name CDriveRescueCLI --icon "src\ui\assets\app.ico" --hidden-import psutil --collect-all send2trash --add-data "src/core/cache_rules.json;src/core" backend_cli.py
+"%PY%" -m PyInstaller --noconfirm --clean --console --name CDriveRescueCLI --version-file "build\version_info_CDriveRescueCLI.txt" --icon "src\ui\assets\app.ico" --hidden-import psutil --collect-all send2trash --add-data "src/core/cache_rules.json;src/core" backend_cli.py
 if errorlevel 1 exit /b 1
 
 :verify

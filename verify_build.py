@@ -1,8 +1,9 @@
 """打包前后检查，由 build_exe.bat 调用。
 
 用法：
-    .venv\\Scripts\\python.exe verify_build.py preflight gui|cli   # 打包前：确认解释器和依赖
-    .venv\\Scripts\\python.exe verify_build.py verify gui|cli      # 打包后：确认产物里真的带上了依赖
+    .venv\\Scripts\\python.exe verify_build.py preflight gui|cli     # 打包前：确认解释器和依赖
+    .venv\\Scripts\\python.exe verify_build.py version-file gui|cli  # 生成 EXE 版本信息（来自 src.__version__）
+    .venv\\Scripts\\python.exe verify_build.py verify gui|cli        # 打包后：确认产物里真的带上了依赖
 
 任一检查失败时返回非零退出码，让 build_exe.bat 停止并报错。
 """
@@ -34,6 +35,48 @@ class Checker:
         return ok
 
 
+def app_version() -> str:
+    """唯一的版本来源：src/__init__.py 中的 __version__。"""
+    import re
+    text = (ROOT / "src" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'__version__\s*=\s*"(\d+)\.(\d+)\.(\d+)"', text)
+    if not match:
+        raise SystemExit("src/__init__.py 中找不到 x.y.z 格式的 __version__")
+    return ".".join(match.groups())
+
+
+def version_file_path(mode: str) -> Path:
+    return ROOT / "build" / f"version_info_{NAMES[mode]}.txt"
+
+
+def write_version_file(mode: str) -> int:
+    version = app_version()
+    parts = tuple(int(x) for x in version.split(".")) + (0,)
+    name = NAMES[mode]
+    text = f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers={parts}, prodvers={parts}, mask=0x3f, flags=0x0, OS=0x40004,
+                    fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('080404b0', [
+      StringStruct('CompanyName', 'CDriveRescue contributors'),
+      StringStruct('FileDescription', 'C盘焦虑拯救者 CDriveRescue'),
+      StringStruct('FileVersion', '{version}'),
+      StringStruct('InternalName', '{name}'),
+      StringStruct('OriginalFilename', '{name}.exe'),
+      StringStruct('ProductName', 'CDriveRescue'),
+      StringStruct('ProductVersion', '{version}'),
+      StringStruct('LegalCopyright', 'MIT License')])]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)
+"""
+    path = version_file_path(mode)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    print(f"版本信息：{version} → {path}")
+    return 0
+
+
 def expected_python_dll() -> str:
     return f"python{sys.version_info.major}{sys.version_info.minor}.dll"
 
@@ -43,6 +86,7 @@ def preflight(mode: str) -> int:
     exe = Path(sys.executable).resolve()
     venv = (ROOT / ".venv").resolve()
     print(f"打包解释器：Python {sys.version.split()[0]}  ({exe})")
+    print(f"程序版本：{app_version()}（来自 src/__init__.py）")
     c.check(venv in exe.parents, "使用项目 .venv 中的 Python",
             "请用 .venv\\Scripts\\python.exe 运行，不要用 conda 或系统 Python。")
     leaks = [d for d in os.environ.get("PATH", "").split(os.pathsep)
@@ -79,7 +123,13 @@ def verify(mode: str) -> int:
     build = ROOT / "build" / name
     print(f"检查打包产物：{dist}")
 
-    c.check((dist / f"{name}.exe").is_file(), f"{name}.exe 存在")
+    exe_file = dist / f"{name}.exe"
+    c.check(exe_file.is_file(), f"{name}.exe 存在")
+    version = app_version()
+    if exe_file.is_file():
+        c.check(version.encode("utf-16-le") in exe_file.read_bytes(),
+                f"{name}.exe 内嵌版本信息为 {version}",
+                "版本资源缺失或与 src/__init__.py 不一致，请确认打包时使用了 --version-file。")
 
     want = expected_python_dll()
     found = {p.name.lower() for p in _find(dist, "python3*.dll") if p.name.lower() != "python3.dll"}
@@ -113,7 +163,8 @@ def verify(mode: str) -> int:
         text = "\n".join(t.read_text(encoding="utf-8", errors="ignore") for t in tocs)
         wanted = ["'send2trash'", "'psutil'", "'src.core.cache_cleaner'", "'src.core.app_mover'"]
         if mode == "gui":
-            wanted += ["'PyQt6'", "'src.ui.main_window'", "'src.ui.pages'"]
+            wanted += ["'PyQt6'", "'src.ui.main_window'", "'src.ui.pages'", "'src.ui.lab_page'",
+                       "'src.core.system_optimizer'"]
         for token in wanted:
             c.check(token in text, f"Python 模块 {token.strip(chr(39))} 已打包")
     else:
@@ -127,9 +178,11 @@ def verify(mode: str) -> int:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[1] not in ("preflight", "verify") or argv[2] not in NAMES:
+    if len(argv) != 3 or argv[1] not in ("preflight", "version-file", "verify") or argv[2] not in NAMES:
         print(__doc__)
         return 2
+    if argv[1] == "version-file":
+        return write_version_file(argv[2])
     return preflight(argv[2]) if argv[1] == "preflight" else verify(argv[2])
 
 

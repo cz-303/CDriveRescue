@@ -1,5 +1,5 @@
 """
-CDriveRescue Core Foundation Package (Designed & Implemented by Gemini)
+CDriveRescue Core Foundation Package v1.1 (Designed & Implemented by Gemini)
 Exports all shared data contracts, safety guards, and disk analysis engines
 for seamless integration with GPT's engines and Claude's PyQt6 UI.
 """
@@ -12,14 +12,19 @@ from src.core.contracts import (
     CleanSummary,
     CriticalPathForbiddenError,
     DriveHealthReport,
+    DuplicateGroup,
+    HardlinkDedupeSummary,
     IAppMover,
     ICacheCleaner,
     InsufficientTargetSpaceError,
+    ISystemOptimizer,
+    KnownFolderItem,
     LargeFileItem,
     MigrationRecord,
     MigrationRollbackError,
     MigrationStatus,
     MigrationTask,
+    OrphanResidueItem,
     ProcessLockInfo,
     ProcessLockedError,
     ProgressCallback,
@@ -39,14 +44,19 @@ __all__ = [
     "CriticalPathForbiddenError",
     "DiskAnalyzer",
     "DriveHealthReport",
+    "DuplicateGroup",
+    "HardlinkDedupeSummary",
     "IAppMover",
     "ICacheCleaner",
     "InsufficientTargetSpaceError",
+    "ISystemOptimizer",
+    "KnownFolderItem",
     "LargeFileItem",
     "MigrationRecord",
     "MigrationRollbackError",
     "MigrationStatus",
     "MigrationTask",
+    "OrphanResidueItem",
     "ProcessLockInfo",
     "ProcessLockedError",
     "ProgressCallback",

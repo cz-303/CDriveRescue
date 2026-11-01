@@ -3,13 +3,16 @@ CDriveRescue 主窗口 (Claude)
 ==========================
 由 main.py 以如下方式构造：
 
-    MainWindow(disk_analyzer=..., safety_guard=SafetyGuard, cache_cleaner=..., app_mover=...)
+    MainWindow(disk_analyzer=..., safety_guard=SafetyGuard, cache_cleaner=..., app_mover=...,
+               system_optimizer=...)
 
-cache_cleaner / app_mover 可以为 None（模块未合入时），对应页面会显示不可用提示。
+cache_cleaner / app_mover / system_optimizer 可以为 None（模块未合入时），对应页面会显示不可用提示。
+v1.1 新增第 6 个页签“深水区瘦身实验室”（src/ui/lab_page.py）。
 """
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -22,7 +25,8 @@ from PyQt6.QtWidgets import (
 
 from src import __version__
 from src.ui.pages import AppContext, CachePage, DashboardPage, LargeFilesPage, MigrationPage, RecordsPage
-from src.ui.workers import OperationGate, Worker
+from src.ui.lab_page import LabPage
+from src.ui.workers import BackendThread, OperationGate, Worker
 
 logger = logging.getLogger("UI.MainWindow")
 
@@ -53,7 +57,8 @@ def app_icon() -> QIcon:
     png = ICON_PATH.with_suffix(".png")
     return QIcon(str(png)) if png.exists() else QIcon()
 
-NAV = ["C 盘体检", "缓存清理", "大文件猎手", "软件搬家", "迁移记录"]
+NAV = ["C 盘体检", "缓存清理", "大文件猎手", "软件搬家", "迁移记录", "深水区瘦身实验室"]
+LAB_INDEX = 5
 
 
 def _light_palette() -> QPalette:
@@ -81,7 +86,8 @@ def _light_palette() -> QPalette:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, disk_analyzer, safety_guard, cache_cleaner=None, app_mover=None):
+    def __init__(self, disk_analyzer, safety_guard, cache_cleaner=None, app_mover=None,
+                 system_optimizer=None):
         super().__init__()
         app = QApplication.instance()
         if app is not None:
@@ -90,7 +96,8 @@ class MainWindow(QMainWindow):
             app.setPalette(_light_palette())
 
         self.gate = OperationGate()
-        self.ctx = AppContext(disk_analyzer, safety_guard, cache_cleaner, app_mover, self.gate)
+        self.ctx = AppContext(disk_analyzer, safety_guard, cache_cleaner, app_mover, self.gate,
+                              optimizer=system_optimizer)
 
         self.setWindowTitle("C盘焦虑拯救者 · CDriveRescue")
         self.setWindowIcon(app_icon())
@@ -109,7 +116,8 @@ class MainWindow(QMainWindow):
         self.large = LargeFilesPage(self.ctx)
         self.migration = MigrationPage(self.ctx)
         self.records = RecordsPage(self.ctx)
-        for page in (self.dashboard, self.cache, self.large, self.migration, self.records):
+        self.lab = LabPage(self.ctx)
+        for page in (self.dashboard, self.cache, self.large, self.migration, self.records, self.lab):
             self.stack.addWidget(page)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -121,6 +129,7 @@ class MainWindow(QMainWindow):
         self.migration.records_changed.connect(self._records_dirty)
         self.records.disk_changed.connect(self.dashboard.refresh)
         self.records.pending_changed.connect(self.dashboard.set_pending)
+        self.lab.disk_changed.connect(self.dashboard.refresh)
         self.gate.changed.connect(self._on_gate_changed)
 
         self.nav.setCurrentRow(0)
@@ -216,13 +225,31 @@ class MainWindow(QMainWindow):
 
     # -- lifecycle ----------------------------------------------------------
     def closeEvent(self, event):  # noqa: N802
-        if self.gate.busy:
+        if self.gate.busy or BackendThread.running(mutating=True):
             QMessageBox.warning(
                 self, "操作进行中",
-                f"“{self.gate.current}”还没有完成。为避免留下未完成的事务，请等它结束后再关闭。")
+                f"“{self.gate.current or '磁盘操作'}”还没有完成。为避免留下未完成的事务，请等它结束后再关闭。")
             event.ignore()
             return
-        # 只读扫描在守护线程中运行，可直接退出
+        scans = BackendThread.running(mutating=False)
+        if scans:
+            # QThread 不能在运行中被销毁；只读扫描没有数据风险，确认后直接结束进程。
+            names = "、".join(sorted({t.label for t in scans}))
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("扫描还在进行")
+            box.setText(f"“{names}”还没完成。现在退出会直接停止扫描，不会影响任何文件。")
+            quit_btn = box.addButton("退出", QMessageBox.ButtonRole.AcceptRole)
+            stay = box.addButton("继续等待", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(stay)
+            box.exec()
+            if box.clickedButton() is not quit_btn:
+                event.ignore()
+                return
+            logger.info("退出时停止只读扫描: %s", names)
+            logging.shutdown()
+            os._exit(0)
+        # v1.0 页面的只读任务在守护线程中运行，可直接退出
         running = [w.name for w in list(Worker._alive) if w.is_running()]
         if running:
             logger.info("退出时仍有只读任务在运行，将直接结束: %s", running)

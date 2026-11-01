@@ -1,27 +1,35 @@
 r"""
-CDriveRescue (C盘焦虑拯救者) - 磁盘健康度诊断、大文件猎手与可搬家软件雷达
+CDriveRescue (C盘焦虑拯救者) - 磁盘健康度诊断、大文件猎手与 v1.1 深度扫描雷达
 ===========================================================================
 Responsible Model: Gemini (Chief System Architect & Disk I/O Specialist)
 
-Core Responsibilities:
-1. Compute the C-Drive Anxiety Score (0~100) and generate actionable, empathetic
-   diagnostics for users suffering from low disk space.
-2. Inspect system-level space hogs (`C:\hiberfil.sys`, `C:\pagefile.sys`, `C:\swapfile.sys`).
-3. High-speed directory tree size aggregation using `os.scandir` without following
-   reparse points/junctions (preventing double counting or infinite recursion).
-4. Discover large standalone files (>500MB by default, e.g., `.iso`, `.zip`, `.mp4`, `.vhdx`)
-   and large migratable software folders in `Program Files`, `AppData`, and WeChat/QQ dirs.
+Core Responsibilities (v1.0 + v1.1 Step-1 Upgrade):
+1. Compute the C-Drive Anxiety Score (0~100) and generate actionable diagnostics.
+2. Inspect system-level space hogs (`hiberfil.sys`, `pagefile.sys`, `WinSxS`).
+3. High-speed directory tree size aggregation (`os.scandir`) skipping junctions.
+4. Discover large standalone files (>500MB) and large migratable software folders.
+5. [NEW v1.1] Two-stage ultra-fast duplicate file scanner (`scan_duplicate_files_fast`):
+   groups by exact file size -> 64KB head/tail fast fingerprint -> full SHA-256 verification,
+   specifically targeting WeChat/QQ `FileStorage\MsgAttach` & `File` duplicate attachments.
+6. [NEW v1.1] Windows Known Folders inspector (`inspect_windows_known_folders`):
+   evaluates `Downloads`, `Desktop`, `Documents`, `Videos`, and `Pictures` on C: drive.
+7. [NEW v1.1] Uninstalled software orphan hunter (`discover_orphan_appdata_dirs`):
+   cross-references Windows Uninstall Registry & `Program Files` against `AppData`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import os
 import platform
+import re
 import shutil
 import string
+import time
+from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 try:
     import psutil  # type: ignore
@@ -31,8 +39,11 @@ except ImportError:
 from src.core.contracts import (
     AnxietyLevel,
     DriveHealthReport,
+    DuplicateGroup,
+    KnownFolderItem,
     LargeFileItem,
     MigrationTask,
+    OrphanResidueItem,
     ProgressCallback,
     RiskLevel,
     SystemSlimItem,
@@ -42,9 +53,8 @@ from src.core.safety_guard import SafetyGuard
 
 
 class DiskAnalyzer:
-    """C盘空间深度体检、大文件扫描与软件搬家雷达引擎"""
+    """C盘空间深度体检、大文件扫描、软件搬家雷达与 v1.1 深水区分析引擎"""
 
-    # 常见可安全归档或移至其他盘的大文件扩展名提示表
     SAFE_ARCHIVE_EXTENSIONS = {
         ".iso": "光盘镜像安装包，安装完成后通常可直接删除或移至 D 盘备份",
         ".zip": "压缩归档包，建议解压确认后移至非系统盘保存",
@@ -71,12 +81,6 @@ class DiskAnalyzer:
     # 1. C盘焦虑指数与健康度诊断 (Drive Health & Anxiety Score)
     # -----------------------------------------------------------------------
     def analyze_drive_health(self, target_drive: Optional[str] = None) -> DriveHealthReport:
-        r"""
-        生成完整的 C 盘健康度与空间焦虑评估报告：
-        - 综合已用百分比与绝对剩余 GB 数计算 0~100 焦虑指数
-        - 自动探测本机可用的目标搬家数据盘（如 D:\, E:\）
-        - 检测休眠文件 hiberfil.sys 与虚拟内存占用
-        """
         drive = target_drive or self.system_drive
         probe = drive if os.path.exists(drive) else os.path.abspath(os.sep)
         usage = shutil.disk_usage(probe)
@@ -85,7 +89,6 @@ class DiskAnalyzer:
         free_gb = usage.free / (1024 ** 3)
         used_pct = (usage.used / usage.total * 100.0) if usage.total > 0 else 0.0
 
-        # 计算空间焦虑指数 (0~100)
         anxiety_score = self._compute_anxiety_score(used_pct, free_gb)
         if anxiety_score >= 75:
             anxiety_level = AnxietyLevel.CRITICAL
@@ -122,10 +125,6 @@ class DiskAnalyzer:
 
     @staticmethod
     def _compute_anxiety_score(used_pct: float, free_gb: float) -> int:
-        """
-        结合使用率百分比与剩余绝对容量计算焦虑分：
-        即使大硬盘使用率 85%，若剩余不到 15GB 也会触发系统卡顿与微信无法接收文件。
-        """
         base_score = used_pct
         if free_gb < 10.0:
             base_score = max(base_score, 92.0 + (10.0 - free_gb) * 0.8)
@@ -136,7 +135,7 @@ class DiskAnalyzer:
         return int(min(100, max(0, round(base_score))))
 
     def inspect_system_slim_items(self, drive_root: str = "C:\\") -> List[SystemSlimItem]:
-        """检测 C 盘根目录下看不见的系统级空间巨兽（hiberfil.sys 与 pagefile.sys）"""
+        """检测 C 盘根目录下看不见的系统级空间巨兽（hiberfil.sys、pagefile.sys 与 WinSxS 更新备份）"""
         items: List[SystemSlimItem] = []
         root = Path(drive_root)
 
@@ -177,11 +176,28 @@ class DiskAnalyzer:
                 ),
             )
         )
+
+        # 3. [NEW v1.1] WinSxS 系统更新组件存储瘦身项
+        winsxs_path = root / "Windows" / "WinSxS"
+        items.append(
+            SystemSlimItem(
+                id="sys_winsxs_dism",
+                name="Windows 组件存储 (WinSxS)",
+                path=str(winsxs_path),
+                size_bytes=0,  # 避免启动时阻塞遍历整个 WinSxS
+                exists=winsxs_path.exists(),
+                can_slim=True,
+                command_hint="Dism.exe /Online /Cleanup-Image /StartComponentCleanup",
+                description=(
+                    "使用 Windows 自带的 DISM 组件清理（StartComponentCleanup），删除已被新版本替代的旧系统组件。"
+                    "能释放多少空间取决于系统的更新情况；需要管理员权限，可能耗时较长。"
+                ),
+            )
+        )
         return items
 
     @staticmethod
     def discover_target_drives(exclude_drive: str = "C:\\") -> List[Tuple[str, int]]:
-        """发现本机所有可用于存放搬家软件的其他逻辑磁盘分区（按剩余空间从大到小排序）"""
         norm_exclude = os.path.normcase(exclude_drive.rstrip("\\/"))
         candidates: List[Tuple[str, int]] = []
 
@@ -229,13 +245,13 @@ class DiskAnalyzer:
                 f"C盘处于【重度空间焦虑】状态！仅剩 {free_gb:.1f} GB 可用 ({used_pct:.1f}% 已满)，"
                 "随时可能导致微信拒收文件、系统更新失败或软件卡顿。"
             )
-            recs.append("立即执行【深度缓存清理】，一键释放系统 Temp、浏览器及社交软件缩略图缓存。")
+            recs.append("先执行【缓存清理】；聊天附件重复较多时，可在实验室用【重复附件硬链接合并】释放重复占用的空间。")
         elif anxiety_level == AnxietyLevel.MODERATE:
             headline = (
                 f"C盘处于【中度紧绷】状态（剩余 {free_gb:.1f} GB / 共 {total_gb:.0f} GB），"
-                "建议清理历史缓存并将大型软件搬家至数据盘。"
+                "建议清理历史缓存并将大型软件及“下载/桌面”目录搬家至数据盘。"
             )
-            recs.append("定期清理开发工具包缓存（pip / npm / Gradle）与微信视频缓存。")
+            recs.append("使用 v1.1【卸载残留猎手】清理 AppData 中已卸载软件遗留的孤儿文件夹。")
         else:
             headline = (
                 f"C盘空间健康充沛（剩余 {free_gb:.1f} GB 可用，使用率 {used_pct:.1f}%），"
@@ -253,7 +269,7 @@ class DiskAnalyzer:
             best_drive, best_free = target_drives[0]
             recs.append(
                 f"检测到目标数据盘 {best_drive} 拥有 {format_bytes(best_free)} 充裕空间，"
-                f"非常适合通过 `mklink /J` 将 C 盘肥胖软件无损搬家过去。"
+                f"可以把 C 盘上的大文件夹或个人文件夹迁移过去（迁移前会完整复制并逐个校验）。"
             )
         return headline, recs
 
@@ -262,10 +278,6 @@ class DiskAnalyzer:
     # -----------------------------------------------------------------------
     @classmethod
     def calculate_dir_stats(cls, root_path: str) -> Tuple[int, int]:
-        """
-        使用非递归栈 + `os.scandir` 高速统计目录总字节数与文件总数。
-        严格跳过 NTFS Junction / 符号链接子目录，避免重复统计已搬家的目录或陷入死循环。
-        """
         if not os.path.exists(root_path) or SafetyGuard.is_junction_or_symlink(root_path):
             return 0, 0
 
@@ -296,14 +308,10 @@ class DiskAnalyzer:
     def scan_large_files(
         self,
         root_paths: Optional[List[str]] = None,
-        min_size_bytes: int = 500 * 1024 * 1024,  # 默认 500 MB
+        min_size_bytes: int = 500 * 1024 * 1024,
         top_n: int = 50,
         progress_cb: Optional[ProgressCallback] = None,
     ) -> List[LargeFileItem]:
-        """
-        大文件猎手：扫描用户目录或指定路径下体积超过阈值的大文件，并按大小降序返回 Top-N。
-        自动跳过 `C:\\Windows` 等核心系统目录，避免误导用户删除系统镜像。
-        """
         if root_paths is None:
             user_home = os.path.expanduser("~")
             root_paths = [user_home]
@@ -326,7 +334,6 @@ class DiskAnalyzer:
                     pct = min(95, scanned_dirs // 10)
                     progress_cb(pct, f"正在扫描大文件: {current}", total_found_bytes)
 
-                # 跳过受保护的 Windows 核心目录
                 norm_curr = SafetyGuard.normalize_path(current)
                 if any(
                     norm_curr == crit or norm_curr.startswith(crit + "\\")
@@ -358,7 +365,6 @@ class DiskAnalyzer:
         if progress_cb:
             progress_cb(100, "大文件扫描完成", total_found_bytes)
 
-        # 按文件体积从大到小排序并包装为 LargeFileItem
         sorted_entries = sorted(min_heap, key=lambda x: x[0], reverse=True)
         results: List[LargeFileItem] = []
         for size_b, fpath, mtime in sorted_entries:
@@ -396,14 +402,10 @@ class DiskAnalyzer:
     def discover_migratable_Directories(
         self,
         custom_scan_roots: Optional[List[Tuple[str, str]]] = None,
-        min_size_bytes: int = 200 * 1024 * 1024,  # 默认 >= 200MB 才推荐搬家
+        min_size_bytes: int = 200 * 1024 * 1024,
         recommended_target_root: str = r"D:\CDriveRescue_Moved",
         progress_cb: Optional[ProgressCallback] = None,
     ) -> List[MigrationTask]:
-        r"""
-        自动扫描 C 盘常见软件安装与大型数据堆积目录（Program Files、AppData\Local、微信/QQ 数据目录），
-        找出适合通过 `mklink /J` 无损搬家的大体积文件夹，并检测当前是否已建立软链接或有进程占用。
-        """
         if custom_scan_roots is None:
             user_home = os.path.expanduser("~")
             custom_scan_roots = [
@@ -432,7 +434,6 @@ class DiskAnalyzer:
                     continue
 
                 dir_path = entry.path
-                # 先过一遍 SafetyGuard，剔除 Windows Defender、Microsoft 核心目录等不可搬家项
                 try:
                     SafetyGuard.validate_for_migration(
                         dir_path, os.path.join(recommended_target_root, entry.name)
@@ -478,6 +479,453 @@ class DiskAnalyzer:
         if progress_cb:
             progress_cb(100, f"共发现 {len(tasks)} 个可搬家大目录", total_candidates_bytes)
         return tasks
+
+    # -----------------------------------------------------------------------
+    # 4. [NEW v1.1] 微信/QQ 重复文件三级闪电哈希与硬链接去重扫描器
+    # -----------------------------------------------------------------------
+    def scan_duplicate_files_fast(
+        self,
+        scan_roots: Optional[List[str]] = None,
+        min_file_size: int = 1 * 1024 * 1024,  # 默认 >= 1MB 的文件才纳入去重，速度极快且收益高
+        source_app_label: str = "WeChat/QQ",
+        progress_cb: Optional[ProgressCallback] = None,
+    ) -> List[DuplicateGroup]:
+        r"""
+        [v1.1 核心算法] 三级漏斗重复文件扫描器（按“文件实体”而不是“路径”去重）：
+
+        文件身份：Windows 上 `DirEntry.stat()` 的 st_ino / st_dev / st_nlink 恒为 0，
+        因此身份一律通过 `os.stat()` 取得 `(st_dev, st_ino)`；取不到可靠身份（为 0）的文件保守跳过。
+
+        - 扫描根：相同或嵌套的扫描根只保留最外层；目录按真实路径去重，同一路径只登记一次。
+        - 实体：指向同一 `(st_dev, st_ino)` 的多条路径（已有硬链接）视为一个实体，只哈希一次。
+        - 第一级：按 (卷, 精确字节大小) 分桶；硬链接不能跨卷，主文件只在同一卷内选择。
+        - 第二级：同桶实体读取首尾各 64KB 计算快速指纹。
+        - 第三级：首尾指纹一致的实体计算全文 SHA-256。
+        - 主文件：优先保留链接数最多（已被共享）的实体。
+        - 副本：其余实体中仅统计链接数为 1 的实体——执行器会拒绝合并已有其他硬链接的副本，
+          因此这类实体既不列入 duplicate_paths，也不计入可省空间。
+        """
+        if scan_roots is None:
+            scan_roots = self.default_duplicate_scan_roots()
+        roots = self._dedupe_scan_roots(scan_roots)
+
+        # (st_dev, st_ino) -> {"paths": [...], "size": int, "nlink": int}
+        entities: Dict[Tuple[int, int], Dict] = {}
+        seen_paths: Set[str] = set()
+        seen_dirs: Set[str] = set()
+        stack = list(roots)
+
+        while stack:
+            current = stack.pop()
+            dir_key = os.path.normcase(os.path.realpath(current))
+            if dir_key in seen_dirs:
+                continue
+            seen_dirs.add(dir_key)
+            try:
+                iterator = os.scandir(current)
+            except OSError:
+                continue
+            with iterator:
+                for entry in iterator:
+                    try:
+                        if entry.is_symlink() or SafetyGuard.is_junction_or_symlink(entry.path):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if os.path.splitext(entry.name)[1].lower() in SafetyGuard.FORBIDDEN_HARDLINK_EXTENSIONS:
+                            continue
+                        path_key = os.path.normcase(os.path.abspath(entry.path))
+                        if path_key in seen_paths:
+                            continue
+                        seen_paths.add(path_key)
+                        # 大小用 DirEntry 预筛（Windows 上可靠且无需额外系统调用），身份必须用 os.stat
+                        if entry.stat(follow_symlinks=False).st_size < min_file_size:
+                            continue
+                        st = os.stat(entry.path, follow_symlinks=False)
+                        if st.st_size < min_file_size:
+                            continue
+                        if not st.st_ino or not st.st_dev:
+                            continue  # 身份不可靠：无法判断是否已是硬链接，保守地不参与去重
+                        key = (st.st_dev, st.st_ino)
+                        entity = entities.get(key)
+                        if entity is None:
+                            entities[key] = {"paths": [entry.path], "size": st.st_size, "nlink": st.st_nlink}
+                        else:
+                            entity["paths"].append(entry.path)
+                    except OSError:
+                        continue
+
+        buckets: Dict[Tuple[int, int], List[Tuple[int, int]]] = defaultdict(list)
+        for key, entity in entities.items():
+            buckets[(key[0], entity["size"])].append(key)
+        candidate_buckets = [(bk, keys) for bk, keys in buckets.items() if len(keys) > 1]
+        total_buckets = max(1, len(candidate_buckets))
+        duplicate_groups: List[DuplicateGroup] = []
+        accumulated_savable = 0
+
+        def links(key: Tuple[int, int]) -> int:
+            entity = entities[key]
+            return max(int(entity["nlink"] or 1), len(entity["paths"]))
+
+        for b_idx, ((dev, fsize), keys) in enumerate(candidate_buckets):
+            edge_buckets: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+            for key in keys:
+                edge_hash = self._compute_edge_hash(entities[key]["paths"][0], fsize)
+                if edge_hash:
+                    edge_buckets[edge_hash].append(key)
+
+            for edge_keys in edge_buckets.values():
+                if len(edge_keys) < 2:
+                    continue
+                full_buckets: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+                for key in edge_keys:
+                    full_h = self._compute_full_sha256(entities[key]["paths"][0])
+                    if full_h:
+                        full_buckets[full_h].append(key)
+
+                for sha256_hex, same_keys in full_buckets.items():
+                    if len(same_keys) < 2:
+                        continue
+                    ordered = sorted(same_keys, key=lambda k: (-links(k), sorted(entities[k]["paths"])[0].lower()))
+                    master_key, others = ordered[0], ordered[1:]
+                    mergeable = [k for k in others if links(k) == 1]
+                    if not mergeable:
+                        continue
+                    master_path = sorted(entities[master_key]["paths"], key=str.lower)[0]
+                    grp = DuplicateGroup(
+                        group_id=f"dup_{sha256_hex[:10]}_{dev & 0xFFFFFF:06x}",
+                        content_hash=sha256_hex,
+                        file_name_sample=os.path.basename(master_path),
+                        single_size_bytes=fsize,
+                        master_path=master_path,
+                        duplicate_paths=sorted((entities[k]["paths"][0] for k in mergeable), key=str.lower),
+                        source_app=source_app_label,
+                    )
+                    accumulated_savable += grp.savable_bytes
+                    duplicate_groups.append(grp)
+
+            if progress_cb:
+                pct = int(((b_idx + 1) / total_buckets) * 95)
+                progress_cb(pct, f"正在比对重复文件指纹 ({b_idx + 1}/{total_buckets})", accumulated_savable)
+
+        duplicate_groups.sort(key=lambda g: g.savable_bytes, reverse=True)
+        if progress_cb:
+            progress_cb(100, f"共发现 {len(duplicate_groups)} 组可硬链接去重的重复文件", accumulated_savable)
+        return duplicate_groups
+
+    @staticmethod
+    def _dedupe_scan_roots(scan_roots: List[str]) -> List[str]:
+        """去掉不存在、重复以及嵌套在其他根之内的扫描根（按真实路径比较）。"""
+        resolved: List[Tuple[str, str]] = []
+        for root in scan_roots:
+            if not root or not os.path.isdir(root):
+                continue
+            real = os.path.normcase(os.path.realpath(os.path.abspath(root)))
+            resolved.append((real, os.path.abspath(root)))
+        resolved.sort(key=lambda pair: len(pair[0]))
+        kept: List[Tuple[str, str]] = []
+        for real, original in resolved:
+            if any(real == k or real.startswith(k.rstrip(os.sep) + os.sep) for k, _ in kept):
+                continue
+            kept.append((real, original))
+        return [original for _, original in kept]
+
+    def default_duplicate_scan_roots(self) -> List[str]:
+        """默认扫描：实际“文档”下的 WeChat Files / Tencent Files，以及实际“下载”文件夹。读取失败的位置跳过。"""
+        roots: List[str] = []
+        documents = self.resolve_known_folder("Documents")
+        downloads = self.resolve_known_folder("Downloads")
+        if documents:
+            roots += [os.path.join(documents, "WeChat Files"), os.path.join(documents, "Tencent Files")]
+        if downloads:
+            roots.append(downloads)
+        return roots
+
+    @staticmethod
+    def _compute_edge_hash(file_path: str, file_size: int, chunk_size: int = 65536) -> Optional[str]:
+        """读取文件头部 64KB 与尾部 64KB 生成极速复合指纹"""
+        try:
+            h = hashlib.blake2b(digest_size=16)
+            with open(file_path, "rb") as fp:
+                head = fp.read(chunk_size)
+                h.update(head)
+                if file_size > chunk_size * 2:
+                    fp.seek(file_size - chunk_size)
+                    tail = fp.read(chunk_size)
+                    h.update(tail)
+            return h.hexdigest()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _compute_full_sha256(file_path: str, buffer_size: int = 1024 * 1024) -> Optional[str]:
+        """分块计算文件完整 SHA-256 校验值"""
+        try:
+            h = hashlib.sha256()
+            with open(file_path, "rb") as fp:
+                while chunk := fp.read(buffer_size):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
+
+    # -----------------------------------------------------------------------
+    # 5. [NEW v1.1] Windows 系统个人文件夹（桌面/下载/文档/视频）检测
+    # -----------------------------------------------------------------------
+    def inspect_windows_known_folders(
+        self,
+        custom_user_home: Optional[str] = None,
+        recommended_target_drive: str = "D:\\",
+    ) -> List[KnownFolderItem]:
+        r"""
+        检测五大系统个人文件夹（Downloads / Desktop / Documents / Videos / Pictures）的实际位置与体积，
+        供 GPT 的 `ISystemOptimizer.relocate_known_folder` 一键搬家。
+
+        - 正常运行：通过 Windows `SHGetKnownFolderPath` 读取实际位置（已重定向、OneDrive 管理、
+          本工具迁移过的位置都能反映出来）。
+        - `custom_user_home`：显式测试/自定义模式，按 `<custom_user_home>\<Key>` 拼接。
+        - 某个文件夹读取失败时不猜测路径：该文件夹不出现在结果中，原因记录在
+          `self.last_known_folder_errors[key]`，界面据此显示“无法读取，不提供迁移”。
+        - 是否位于系统盘按实际系统盘（%SystemDrive%）判断，不写死 C 盘。
+        """
+        self.last_known_folder_errors: Dict[str, str] = {}
+        user_home = custom_user_home or os.path.expanduser("~")
+        username = os.path.basename(user_home.rstrip("\\/")) or "User"
+        system_drive = self.actual_system_drive()
+        target_root = recommended_target_drive.rstrip("\\/")
+        results: List[KnownFolderItem] = []
+
+        for key, (disp_name, guid) in SafetyGuard.WINDOWS_KNOWN_FOLDERS.items():
+            if custom_user_home is not None:
+                curr_path = os.path.join(custom_user_home, key)
+            else:
+                try:
+                    curr_path = self._query_known_folder_path(guid)
+                except Exception as exc:  # 读取失败时不把猜测路径当成已确认路径
+                    self.last_known_folder_errors[key] = f"{disp_name}：无法从 Windows 读取实际位置（{exc}）"
+                    continue
+
+            size_b, f_count = self.calculate_dir_stats(curr_path) if os.path.exists(curr_path) else (0, 0)
+            results.append(
+                KnownFolderItem(
+                    folder_key=key,
+                    display_name=disp_name,
+                    folder_guid=guid,
+                    current_path=curr_path,
+                    recommended_target_path=f"{target_root}\\Users\\{username}\\{key}",
+                    size_bytes=size_b,
+                    file_count=f_count,
+                    is_on_system_drive=self._is_on_drive(curr_path, system_drive),
+                )
+            )
+
+        results.sort(key=lambda item: item.size_bytes, reverse=True)
+        return results
+
+    def resolve_known_folder(self, key: str) -> Optional[str]:
+        """返回个人文件夹的实际位置；Windows 上读取失败返回 None。非 Windows（开发/测试）按主目录拼接。"""
+        entry = SafetyGuard.WINDOWS_KNOWN_FOLDERS.get(key)
+        if entry is None:
+            return None
+        if platform.system() != "Windows":
+            return os.path.join(os.path.expanduser("~"), key)
+        try:
+            return self._query_known_folder_path(entry[1])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _query_known_folder_path(guid: str) -> str:
+        """调用 Shell32 `SHGetKnownFolderPath` 读取个人文件夹实际位置（只读，不修改任何配置）。"""
+        if platform.system() != "Windows":
+            raise OSError("只能在 Windows 上读取个人文件夹位置")
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                        ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+        raw = uuid.UUID(guid).bytes_le
+        folder_id = _GUID.from_buffer_copy(raw)
+        shell32, ole32 = ctypes.windll.shell32, ctypes.windll.ole32
+        shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(_GUID), wintypes.DWORD, wintypes.HANDLE,
+                                                 ctypes.POINTER(ctypes.c_void_p)]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        buffer = ctypes.c_void_p()
+        hr = shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None, ctypes.byref(buffer))
+        try:
+            if hr < 0 or not buffer.value:
+                raise OSError(f"SHGetKnownFolderPath 失败: HRESULT 0x{hr & 0xFFFFFFFF:08X}")
+            path = ctypes.wstring_at(buffer.value)
+        finally:
+            if buffer.value:
+                ole32.CoTaskMemFree(buffer)
+        if not path:
+            raise OSError("Windows 返回了空路径")
+        return path
+
+    @staticmethod
+    def actual_system_drive() -> str:
+        """实际系统盘（如 "C:"）。非 Windows 返回 "/"。"""
+        if platform.system() != "Windows":
+            return "/"
+        drive = os.environ.get("SystemDrive", "")
+        if not drive:
+            try:
+                import ctypes
+                buf = ctypes.create_unicode_buffer(260)
+                if ctypes.windll.kernel32.GetWindowsDirectoryW(buf, 260):
+                    drive = os.path.splitdrive(buf.value)[0]
+            except Exception:
+                drive = ""
+        return (drive or "C:").rstrip("\\/")
+
+    @staticmethod
+    def _is_on_drive(path: str, system_drive: str) -> bool:
+        if system_drive == "/":
+            return os.path.isabs(path)
+        import ntpath
+        return ntpath.splitdrive(path)[0].casefold() == system_drive.casefold()
+
+    # -----------------------------------------------------------------------
+    # 6. [NEW v1.1] 卸载残留猎手（AppData / ProgramData 孤儿目录智能识别）
+    # -----------------------------------------------------------------------
+    def discover_orphan_appdata_dirs(
+        self,
+        appdata_roots: Optional[List[Tuple[str, str]]] = None,
+        installed_app_names: Optional[Set[str]] = None,
+        min_size_bytes: int = 50 * 1024 * 1024,  # 默认 >= 50MB
+        stale_days_threshold: int = 60,          # 默认超过 60 天未修改视为高置信度残留
+    ) -> List[OrphanResidueItem]:
+        """
+        [v1.1 创新功能] 扫描 `AppData\\Local`、`AppData\\Roaming` 与 `ProgramData`，
+        对比当前已安装软件词根集合（来自 `Program Files` 与注册表 `Uninstall`），
+        精准揪出“软件早已卸载，但残留文件夹仍霸占数 GB 空间”的孤儿目录。
+        """
+        if appdata_roots is None:
+            user_home = os.path.expanduser("~")
+            appdata_roots = [
+                (os.path.join(user_home, "AppData", "Local"), "AppData\\Local"),
+                (os.path.join(user_home, "AppData", "Roaming"), "AppData\\Roaming"),
+                (r"C:\ProgramData", "ProgramData"),
+            ]
+
+        active_tokens = installed_app_names if installed_app_names is not None else self._collect_installed_app_tokens()
+        orphans: List[OrphanResidueItem] = []
+        now_ts = time.time()
+
+        for root_dir, scope_label in appdata_roots:
+            if not os.path.exists(root_dir):
+                continue
+            try:
+                entries = list(os.scandir(root_dir))
+            except OSError:
+                continue
+
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False) or SafetyGuard.is_junction_or_symlink(entry.path):
+                    continue
+
+                folder_name = entry.name
+                if SafetyGuard.is_protected_appdata_vendor(folder_name, active_tokens):
+                    continue
+
+                size_b, f_count = self.calculate_dir_stats(entry.path)
+                if size_b < min_size_bytes:
+                    continue
+
+                try:
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    mtime = now_ts
+
+                days_ago = max(0, int((now_ts - mtime) / 86400))
+                if days_ago >= stale_days_threshold:
+                    confidence = RiskLevel.SAFE
+                    reason = (
+                        f"未在系统已安装程序列表中找到匹配项，且该目录已连续 {days_ago} 天无任何读写活动，"
+                        "极可能是已卸载软件遗留的孤儿数据。"
+                    )
+                else:
+                    confidence = RiskLevel.CAUTION
+                    reason = (
+                        f"未在标准安装目录中找到同名程序（最近修改于 {days_ago} 天前），"
+                        "可能是绿色版软件配置或近期刚卸载软件的残留，建议确认后移入回收站。"
+                    )
+
+                orphan_id = f"orph_{abs(hash(SafetyGuard.normalize_path(entry.path))) % (10**8)}"
+                orphans.append(
+                    OrphanResidueItem(
+                        orphan_id=orphan_id,
+                        folder_name=folder_name,
+                        path=entry.path,
+                        location_scope=scope_label,
+                        size_bytes=size_b,
+                        file_count=f_count,
+                        last_modified_days_ago=days_ago,
+                        confidence_level=confidence,
+                        reason=reason,
+                    )
+                )
+
+        orphans.sort(key=lambda item: item.size_bytes, reverse=True)
+        return orphans
+
+    @staticmethod
+    def _collect_installed_app_tokens() -> Set[str]:
+        """收集本机 Program Files 及 Windows 注册表 Uninstall 中的活跃软件词根（小写化）"""
+        tokens: Set[str] = set()
+        program_dirs = [r"C:\Program Files", r"C:\Program Files (x86)"]
+        for pdir in program_dirs:
+            if os.path.exists(pdir):
+                try:
+                    for entry in os.scandir(pdir):
+                        if entry.is_dir(follow_symlinks=False):
+                            for word in re.split(r"[\s\-_]+", entry.name.lower()):
+                                if len(word) >= 3:
+                                    tokens.add(word)
+                except OSError:
+                    pass
+
+        if platform.system() == "Windows":
+            try:
+                import winreg  # type: ignore
+
+                uninstall_paths = [
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+                ]
+                for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                    for upath in uninstall_paths:
+                        try:
+                            with winreg.OpenKey(hive, upath) as key:
+                                num_subkeys = winreg.QueryInfoKey(key)[0]
+                                for i in range(num_subkeys):
+                                    try:
+                                        sub_name = winreg.EnumKey(key, i)
+                                        with winreg.OpenKey(key, sub_name) as subkey:
+                                            for val_name in ("DisplayName", "Publisher"):
+                                                try:
+                                                    val, _ = winreg.QueryValueEx(subkey, val_name)
+                                                    for word in re.split(r"[\s\-_]+", str(val).lower()):
+                                                        if len(word) >= 3:
+                                                            tokens.add(word)
+                                                except OSError:
+                                                    pass
+                                    except OSError:
+                                        continue
+                        except OSError:
+                            continue
+            except ImportError:
+                pass
+
+        return tokens
 
     @staticmethod
     def _safe_file_size(path: Path) -> int:

@@ -34,7 +34,7 @@ from src.ui.widgets import (
     AnxietyGauge, Banner, Card, DetailsDialog, ProgressPanel, RISK_TEXT, RiskBadge, StatTile,
     confirm, reveal_in_explorer, same_volume, show_exception,
 )
-from src.ui.workers import OperationGate, run_task
+from src.ui.workers import OperationGate, WinSxSCleanupWorker, dism_needs_restart, run_task, start_thread
 
 CATEGORY_TEXT = {
     CacheCategory.SYSTEM: "系统临时文件",
@@ -57,12 +57,13 @@ SIZE_ROLE = Qt.ItemDataRole.UserRole + 1
 class AppContext:
     """页面共享的后端对象。"""
 
-    def __init__(self, analyzer, guard, cleaner, mover, gate: OperationGate):
+    def __init__(self, analyzer, guard, cleaner, mover, gate: OperationGate, optimizer=None):
         self.analyzer = analyzer
         self.guard = guard
         self.cleaner = cleaner
         self.mover = mover
         self.gate = gate
+        self.optimizer = optimizer  # v1.1 SystemOptimizer，可为 None
 
     @staticmethod
     def has_module(name: str) -> bool:
@@ -240,10 +241,13 @@ class DashboardPage(PageBase):
 
         self.slim_card = Card("系统级大文件")
         self.slim_card.body.addWidget(_label(
-            "这两个文件由 Windows 管理，不能直接删除，只能通过系统设置调整。", "muted"))
+            "这些项目由 Windows 管理，不能直接删除，只能通过系统设置或系统工具调整。", "muted"))
         self.slim_box = QVBoxLayout()
         self.slim_box.setSpacing(12)
         self.slim_card.body.addLayout(self.slim_box)
+        self.dism_progress = ProgressPanel("")
+        self.slim_card.body.addWidget(self.dism_progress)
+        self._dism_thread = None
         self.content.addWidget(self.slim_card)
         self.content.addStretch(1)
 
@@ -334,7 +338,10 @@ class DashboardPage(PageBase):
         lay.setSpacing(16)
         text = QVBoxLayout()
         text.setSpacing(3)
-        size = item.size_human if item.exists else "未生成 / 已关闭"
+        if item.id == "sys_winsxs_dism":
+            size = "体积不预先统计"
+        else:
+            size = item.size_human if item.exists else "未生成 / 已关闭"
         text.addWidget(_label(f"{item.name}  ·  {size}", "sectionTitle"))
         text.addWidget(_label(item.description, "muted"))
         hint = _label(f"系统操作：{item.command_hint}", "muted")
@@ -345,7 +352,71 @@ class DashboardPage(PageBase):
             btn = _button("关闭休眠")
             btn.clicked.connect(self._disable_hibernation)
             lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
+        if item.id == "sys_winsxs_dism" and item.can_slim and item.exists:
+            self.dism_btn = _button("清理组件存储")
+            self.dism_btn.clicked.connect(self._clean_winsxs)
+            if self.ctx.optimizer is None:
+                self.dism_btn.setEnabled(False)
+                self.dism_btn.setToolTip("系统优化引擎 (SystemOptimizer) 未加载")
+            elif self._dism_thread is not None:
+                self.dism_btn.setEnabled(False)
+            lay.addWidget(self.dism_btn, 0, Qt.AlignmentFlag.AlignTop)
         return box
+
+    def _clean_winsxs(self) -> None:
+        if self.ctx.optimizer is None or self._dism_thread is not None:
+            return
+        if not self.ctx.guard.is_admin():
+            QMessageBox.information(
+                self, "需要管理员权限",
+                "清理 Windows 组件存储需要管理员权限。请点击左下角“以管理员身份重启”，然后再操作。")
+            return
+        if not confirm(self, "清理 Windows 组件存储",
+                       "将运行 Windows 自带的 DISM 组件清理（StartComponentCleanup）。",
+                       "• 删除已被新版本替代的旧系统组件。Windows 的计划任务通常会在 30 天后自动做同样的清理，"
+                       "这里是立即执行。\n"
+                       "• 不使用 /ResetBase，不会自动重启电脑。\n"
+                       "• 可能需要 10 分钟或更久。进行中本程序不能关闭，请不要关机或强行结束。\n"
+                       "• 能释放多少空间取决于系统的更新情况，可能很少。",
+                       yes_text="开始清理"):
+            return
+        if not self.gate_acquire("清理 Windows 组件存储"):
+            return
+        if hasattr(self, "dism_btn"):
+            self.dism_btn.setEnabled(False)
+        self.dism_progress.begin("正在启动 DISM…")
+
+        def finished():
+            self._dism_thread = None
+            self.ctx.gate.release()
+            self.dism_progress.hide()
+            self.refresh()
+
+        self._dism_thread = start_thread(
+            WinSxSCleanupWorker(self.ctx.optimizer),
+            on_progress=self.dism_progress.update_progress, on_success=self._on_winsxs,
+            on_error=lambda e: show_exception(self, e, "组件清理没有完成。"), on_done=finished)
+
+    def _on_winsxs(self, result) -> None:
+        ok, message = result
+        lines = (message or "").splitlines()
+        head, details = (lines[0] if lines else ""), "\n".join(lines[1:])
+        box = QMessageBox(self)
+        if ok:
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle("组件清理完成")
+            box.setText(head or "Windows 组件清理完成")
+            if dism_needs_restart(message):
+                box.setInformativeText("请在方便的时候手动重启电脑，以完成剩余的清理。本程序不会自动重启。")
+        else:
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("组件清理没有完成")
+            box.setText(head or "DISM 组件清理失败")
+            box.setInformativeText("没有使用 /ResetBase，系统组件保持原状。详细输出见“显示详细信息”，"
+                                   "完整日志位于 Windows\\Logs\\DISM\\dism.log。")
+        if details:
+            box.setDetailedText(details)
+        box.exec()
 
     def _disable_hibernation(self) -> None:
         guard = self.ctx.guard

@@ -10,11 +10,11 @@ import platform
 import subprocess
 from typing import Iterable, Optional
 
-from PyQt6.QtCore import QRectF, Qt, QUrl
+from PyQt6.QtCore import QRectF, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
-    QProgressBar, QSizePolicy, QVBoxLayout, QWidget,
+    QButtonGroup, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from src.core.contracts import (
@@ -70,6 +70,77 @@ class RiskBadge(QLabel):
         self.setObjectName(f"badge{risk.value.title()}")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+
+class Pill(QLabel):
+    """小号圆角标签。kind: info / safe / caution / danger / muted。"""
+
+    def __init__(self, text: str, kind: str = "info", parent: Optional[QWidget] = None):
+        super().__init__(text, parent)
+        self.setObjectName(f"pill_{kind}")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_kind(self, kind: str) -> None:
+        self.setObjectName(f"pill_{kind}")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+CONFIDENCE_TEXT = {RiskLevel.SAFE: "SAFE · 高置信", RiskLevel.CAUTION: "CAUTION · 需确认",
+                   RiskLevel.DANGER: "DANGER · 禁止"}
+CONFIDENCE_KIND = {RiskLevel.SAFE: "safe", RiskLevel.CAUTION: "caution", RiskLevel.DANGER: "danger"}
+
+
+def confidence_pill(level: RiskLevel) -> Pill:
+    """卸载残留置信度徽章。SAFE 只代表“较可能是残留”，不代表删除一定无影响。"""
+    return Pill(CONFIDENCE_TEXT.get(level, str(level)), CONFIDENCE_KIND.get(level, "muted"))
+
+
+def cell(widget: QWidget, align=Qt.AlignmentFlag.AlignLeft) -> QWidget:
+    """把小部件放进表格单元格，留出边距。"""
+    box = QWidget()
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(4, 0, 4, 0)
+    if align != Qt.AlignmentFlag.AlignLeft:
+        lay.addStretch(1)
+    lay.addWidget(widget)
+    if align != Qt.AlignmentFlag.AlignRight:
+        lay.addStretch(1)
+    return box
+
+
+class SegmentedTabs(QWidget):
+    """分段切换按钮。currentChanged(int)。"""
+
+    currentChanged = pyqtSignal(int)
+
+    def __init__(self, labels, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("segmented")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons = []
+        for idx, text in enumerate(labels):
+            btn = QPushButton(text)
+            btn.setObjectName("segment")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.group.addButton(btn, idx)
+            self.buttons.append(btn)
+            lay.addWidget(btn)
+        lay.addStretch(1)
+        self.group.idClicked.connect(self.currentChanged.emit)
+        if self.buttons:
+            self.buttons[0].setChecked(True)
+
+    def set_current(self, index: int) -> None:
+        self.buttons[index].setChecked(True)
+        self.currentChanged.emit(index)
 
 
 class StatTile(QFrame):
@@ -149,18 +220,32 @@ class ProgressPanel(QWidget):
         self.hide()
 
     def begin(self, text: str = "准备中…") -> None:
+        self.bar.setRange(0, 100)
         self.bar.setValue(0)
         self.action.setText(text)
         self.amount.setText("")
         self.show()
 
+    def begin_busy(self, text: str) -> None:
+        """后端没有进度回调时显示来回滚动的忙碌条。"""
+        self.bar.setRange(0, 0)
+        self.action.setText(text)
+        self.amount.setText("")
+        self.show()
+
     def update_progress(self, percent: int, action: str, size: int) -> None:
+        if self.bar.maximum() == 0 and percent <= 0:
+            self.action.setText(elide_middle(action, 90))
+            return
+        self.bar.setRange(0, 100)
         self.bar.setValue(percent)
         # 路径可能很长，只显示尾部
         self.action.setText(elide_middle(action, 90))
-        self.amount.setText(f"{self.bytes_caption} {format_bytes(size)}")
+        # 没有字节语义的任务（DISM、残留扫描）不显示体积
+        self.amount.setText(f"{self.bytes_caption} {format_bytes(size)}" if self.bytes_caption else "")
 
     def finish(self, text: str = "") -> None:
+        self.bar.setRange(0, 100)
         self.bar.setValue(100)
         if text:
             self.action.setText(text)
@@ -292,7 +377,10 @@ def describe_exception(exc: BaseException) -> tuple[str, str]:
                 "确认无用后可自行删除以释放空间。")
         return "需要人工检查", (
             f"{exc}\n\n自动回滚未能确认数据状态，本工具已保留所有副本和事务日志，没有删除任何文件。"
-            "请不要手动删除任何带 ._cdr_ 字样的文件夹，先到“迁移记录”页查看，或联系熟悉的人协助检查。")
+            "请不要手动删除名称中带 ._cdr_、._kf_bak_ 或 ._hl_bak 的文件夹或文件；"
+            "可在对应页面使用“检查并恢复”，或联系熟悉的人协助检查。")
+    if exc.__class__.__name__ == "LockCheckUnavailable":
+        return "无法检查程序占用", str(exc)
     if isinstance(exc, InsufficientTargetSpaceError):
         return "空间不足", str(exc)
     if isinstance(exc, CriticalPathForbiddenError):

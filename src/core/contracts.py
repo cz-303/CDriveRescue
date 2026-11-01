@@ -1,20 +1,26 @@
 """
-CDriveRescue (C盘焦虑拯救者) - 核心数据契约与三方接口规范 (Data Contracts)
+CDriveRescue (C盘焦虑拯救者) - 核心数据契约与三方接口规范 (Data Contracts v1.1)
 ===========================================================================
 Responsible Model: Gemini (Chief System Architect)
 Collaborators:
-  - GPT: Implements `ICacheCleaner` (`src/core/cache_cleaner.py`) & `IAppMover` (`src/core/app_mover.py`)
+  - GPT: Implements `ICacheCleaner` (`src/core/cache_cleaner.py`),
+         `IAppMover` (`src/core/app_mover.py`), and
+         [NEW v1.1] `ISystemOptimizer` (`src/core/system_optimizer.py`)
   - Claude: Implements PyQt6 UI (`src/ui/main_window.py`, `src/ui/widgets.py`, `src/ui/workers.py`)
 
-This module locks down all cross-module data structures, enums, callback signatures,
-custom exceptions, and abstract base classes so that Gemini, GPT, and Claude code
-can be dropped into the same project directory and run with zero interface conflicts.
+v1.1 Step-1 Upgrade Highlights:
+1. `DuplicateGroup` & `HardlinkDedupeSummary`: For WeChat/QQ multi-received identical file
+   deduplication via NTFS Hardlink (`os.link` / `mklink /H`) — zero file loss, instant space recovery.
+2. `KnownFolderItem`: For Windows native personal folder migration (`Downloads`, `Desktop`,
+   `Documents`, `Videos`, `Pictures`) via `SHSetKnownFolderPath`.
+3. `OrphanResidueItem`: For uninstalled software orphan directory detection in `AppData` / `ProgramData`.
+4. `ISystemOptimizer`: New abstract interface for GPT to implement v1.1 deep optimization operations.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -34,8 +40,8 @@ ProgressCallback = Callable[[int, str, int], None]
 # ===========================================================================
 class RiskLevel(str, Enum):
     """清理或迁移操作的安全风险评级（供 GPT 规则库标注 & Claude 渲染不同颜色徽章）"""
-    SAFE = "SAFE"          # 绿色放心清：零副作用（如系统临时文件、浏览器图片缓存、pip/npm 缓存）
-    CAUTION = "CAUTION"    # 黄色谨慎清：可能清除历史下载或需重新加载数据（如微信接收文件、Windows更新回滚包）
+    SAFE = "SAFE"          # 绿色放心清：零副作用（如系统临时文件、浏览器图片缓存、pip/npm 缓存、硬链接去重）
+    CAUTION = "CAUTION"    # 黄色谨慎清：可能清除历史下载或需重新加载数据（如微信接收文件、卸载残留疑似项）
     DANGER = "DANGER"      # 红色禁止动：系统核心目录或运行中数据库，由 SafetyGuard 强制拦截
 
 
@@ -84,7 +90,7 @@ def format_bytes(size_bytes: int, precision: int = 2) -> str:
 
 
 # ===========================================================================
-# 4. 核心数据模型 (Dataclasses - 跨模块通信载体)
+# 4. v1.0 核心数据模型 (Dataclasses)
 # ===========================================================================
 @dataclass
 class ProcessLockInfo:
@@ -107,7 +113,7 @@ class LargeFileItem:
     size_bytes: int
     modified_timestamp: float
     risk_level: RiskLevel
-    suggestion: str  # 例如："孤立安装包 (.iso/.exe)，安装完毕后可安全删除或移至 D 盘"
+    suggestion: str
 
     @property
     def size_human(self) -> str:
@@ -121,14 +127,14 @@ class LargeFileItem:
 
 @dataclass
 class SystemSlimItem:
-    """系统级大块头专项瘦身项（如休眠文件 hiberfil.sys、虚拟内存 pagefile.sys）"""
+    """系统级大块头专项瘦身项（如休眠文件 hiberfil.sys、虚拟内存 pagefile.sys、WinSxS 组件存储）"""
     id: str
     name: str
     path: str
     size_bytes: int
     exists: bool
     can_slim: bool
-    command_hint: str        # 例如 "powercfg -h off"
+    command_hint: str        # 例如 "powercfg -h off" 或 "Dism.exe /Online /Cleanup-Image /StartComponentCleanup"
     description: str         # 白话文解释对系统的影响
 
     @property
@@ -149,7 +155,7 @@ class DriveHealthReport:
     headline_diagnosis: str          # 一句话治愈诊断结论
     recommendations: List[str] = field(default_factory=list)
     system_slim_items: List[SystemSlimItem] = field(default_factory=list)
-    available_target_drives: List[Tuple[str, int]] = field(default_factory=list)  # 例如 [("D:\\", free_bytes)]
+    available_target_drives: List[Tuple[str, int]] = field(default_factory=list)
 
     @property
     def total_human(self) -> str:
@@ -170,12 +176,12 @@ class CacheItem:
     id: str
     name: str
     category: CacheCategory
-    path: str                        # 展开环境变量后的真实目录路径（或主路径）
-    matched_paths: List[str]         # 实际匹配到的所有子路径列表
+    path: str
+    matched_paths: List[str]
     size_bytes: int
     file_count: int
     risk_level: RiskLevel
-    description: str                 # 白话文清理影响说明（如："仅清理微信图片视频缩略图缓存，不删聊天记录"）
+    description: str
     selected_by_default: bool = True
 
     @property
@@ -208,11 +214,11 @@ class MigrationTask:
     """待搬家软件/大目录候选项（由 Gemini/GPT 扫描生成，供 Claude 软件搬家向导页展示）"""
     app_id: str
     app_name: str
-    source_path: str                 # C 盘原路径，如 C:\Program Files\JetBrains\PyCharm
-    recommended_target_root: str     # 推荐目标盘根目录，如 D:\CDriveRescue_Moved
+    source_path: str
+    recommended_target_root: str
     size_bytes: int
     file_count: int
-    category_label: str              # 如 "大型开发工具" / "微信聊天数据目录" / "独立游戏客户端"
+    category_label: str
     is_already_junction: bool = False
     junction_target: Optional[str] = None
     running_locks: List[ProcessLockInfo] = field(default_factory=list)
@@ -235,11 +241,11 @@ class MigrationRecord:
     """已完成的软件搬家持久化记录（写入 ~/.cdriverescue/migration_history.json）"""
     record_id: str
     app_name: str
-    source_path: str                 # C 盘原位置（现为 Junction 软链接）
-    target_path: str                 # D/E 盘真实物理存储位置
+    source_path: str
+    target_path: str
     size_bytes: int
     file_count: int
-    created_at: str                  # ISO-8601 时间戳
+    created_at: str
     status: MigrationStatus = MigrationStatus.MOVED
     error_message: Optional[str] = None
 
@@ -270,7 +276,100 @@ class MigrationRecord:
 
 
 # ===========================================================================
-# 5. 核心安全与事务异常定义 (Custom Exceptions)
+# 5. [NEW v1.1] 进阶深水区治理数据契约 (v1.1 Step-1 Data Contracts)
+# ===========================================================================
+@dataclass
+class DuplicateGroup:
+    """
+    [v1.1 新增] 相同内容重复文件组（专为微信/QQ 群聊转发多次的相同视频/PDF/安装包设计）
+    原理：通过将 duplicate_paths 替换为指向 master_path 的 NTFS 硬链接 (`os.link` / `mklink /H`)，
+    微信聊天窗口依然能正常打开每一个文件，但物理磁盘只占 1 份空间！
+    """
+    group_id: str
+    content_hash: str                # 首尾 64KB + 全文 SHA256 复合指纹
+    file_name_sample: str            # 代表性文件名 (如 "2026产品发布会宣传片.mp4")
+    single_size_bytes: int           # 单个文件字节大小
+    master_path: str                 # 保留物理实体的主文件路径
+    duplicate_paths: List[str]       # 其余具有完全相同内容但不同路径/命名的副本列表
+    source_app: str = "WeChat/QQ"    # 所属应用标识
+
+    @property
+    def total_copies(self) -> int:
+        return 1 + len(self.duplicate_paths)
+
+    @property
+    def savable_bytes(self) -> int:
+        """建立 NTFS 硬链接后可无损省下的物理空间 = 单个体积 * 副本数"""
+        return self.single_size_bytes * len(self.duplicate_paths)
+
+    @property
+    def savable_human(self) -> str:
+        return format_bytes(self.savable_bytes)
+
+    def to_dict(self) -> Dict:
+        data = asdict(self)
+        data["savable_bytes"] = self.savable_bytes
+        data["savable_human"] = self.savable_human
+        return data
+
+
+@dataclass
+class HardlinkDedupeSummary:
+    """[v1.1 新增] 微信/QQ 重复文件 NTFS 硬链接去重执行结果"""
+    processed_groups: int
+    linked_files_count: int
+    saved_bytes: int
+    skipped_cross_volume: int
+    errors: List[str] = field(default_factory=list)
+
+    @property
+    def saved_human(self) -> str:
+        return format_bytes(self.saved_bytes)
+
+
+@dataclass
+class KnownFolderItem:
+    """
+    [v1.1 新增] Windows 系统个人文件夹（桌面/下载/文档/视频/图片）原生搬家项
+    通过 Windows Shell API `SHSetKnownFolderPath` 迁移，而非普通软链接，与资源管理器 100% 原生兼容。
+    """
+    folder_key: str                  # "Downloads" | "Desktop" | "Documents" | "Videos" | "Pictures"
+    display_name: str                # 如 "下载 (Downloads)"
+    folder_guid: str                 # Windows KNOWNFOLDERID GUID
+    current_path: str                # 当前所在路径 (如 C:\Users\Alice\Downloads)
+    recommended_target_path: str     # 推荐迁移路径 (如 D:\Users\Alice\Downloads)
+    size_bytes: int
+    file_count: int
+    is_on_system_drive: bool
+
+    @property
+    def size_human(self) -> str:
+        return format_bytes(self.size_bytes)
+
+
+@dataclass
+class OrphanResidueItem:
+    """
+    [v1.1 新增] 卸载残留猎手（AppData / ProgramData 孤儿文件夹）扫描结果项
+    对比 Windows 注册表 Uninstall 列表与当前安装目录，揪出“软件早已卸载、残留数据仍在占空间”的目录。
+    """
+    orphan_id: str
+    folder_name: str
+    path: str
+    location_scope: str              # "AppData\\Local" | "AppData\\Roaming" | "ProgramData"
+    size_bytes: int
+    file_count: int
+    last_modified_days_ago: int      # 距离最后一次修改过去了多少天
+    confidence_level: RiskLevel      # SAFE (高置信度已卸载残留) / CAUTION (长期未动用疑似残留)
+    reason: str                      # 判定依据说明（白话文）
+
+    @property
+    def size_human(self) -> str:
+        return format_bytes(self.size_bytes)
+
+
+# ===========================================================================
+# 6. 核心安全与事务异常定义 (Custom Exceptions)
 # ===========================================================================
 class CDriveRescueError(Exception):
     """CDriveRescue 基础异常类"""
@@ -299,7 +398,7 @@ class MigrationRollbackError(CDriveRescueError):
 
 
 # ===========================================================================
-# 6. 供 GPT 实现的抽象引擎接口 (Abstract Interfaces for GPT Modules)
+# 7. 供 GPT 实现的抽象引擎接口 (Abstract Interfaces for GPT Modules)
 # ===========================================================================
 class ICacheCleaner(ABC):
     """GPT 负责实现的缓存扫描与清理器接口 (`src/core/cache_cleaner.py`)"""
@@ -310,7 +409,6 @@ class ICacheCleaner(ABC):
         progress_cb: Optional[ProgressCallback] = None,
         categories: Optional[List[CacheCategory]] = None,
     ) -> List[CacheItem]:
-        """根据 cache_rules.json 扫描所有匹配的缓存项并计算体积"""
         raise NotImplementedError
 
     @abstractmethod
@@ -321,7 +419,6 @@ class ICacheCleaner(ABC):
         dry_run: bool = False,
         progress_cb: Optional[ProgressCallback] = None,
     ) -> CleanSummary:
-        """清理用户勾选的缓存项（支持移入回收站或干跑测试）"""
         raise NotImplementedError
 
 
@@ -335,14 +432,6 @@ class IAppMover(ABC):
         target_root_dir: str,
         progress_cb: Optional[ProgressCallback] = None,
     ) -> MigrationRecord:
-        """
-        执行五步原子软件搬家法：
-        1. 预检空间 (>= 1.1x) 与 SafetyGuard 进程占用/路径黑名单校验
-        2. 完整复制 C 盘源目录至目标盘
-        3. 校验文件数量与字节数
-        4. 将源目录重命名为 `._backup_tmp`，执行 `mklink /J` 创建目录联接
-        5. 验证软链接可用后删除备份并写入 migration_history.json；若异常则自动还原 `._backup_tmp`
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -351,10 +440,54 @@ class IAppMover(ABC):
         record_id: str,
         progress_cb: Optional[ProgressCallback] = None,
     ) -> MigrationRecord:
-        """一键无损还原：移除 C 盘软链接本身（不删目标盘数据），将实体文件移回 C 盘原位"""
         raise NotImplementedError
 
     @abstractmethod
     def list_migration_records(self) -> List[MigrationRecord]:
-        """读取并检验所有历史搬家记录及 Junction 软链接存活状态"""
+        raise NotImplementedError
+
+
+class ISystemOptimizer(ABC):
+    """
+    [NEW v1.1] GPT 负责实现的系统深水区专项瘦身引擎接口 (`src/core/system_optimizer.py`)
+    涵盖三大 v1.1 杀手锏功能：
+    1. 微信/QQ 重复文件 NTFS 硬链接 (`mklink /H` / `os.link`) 无损去重
+    2. Windows 系统个人文件夹（桌面/下载/文档/视频）原生 API 重定向与文件迁移
+    3. WinSxS 系统更新组件库 (`Dism.exe /StartComponentCleanup`) 异步安全瘦身
+    """
+
+    @abstractmethod
+    def deduplicate_via_hardlink(
+        self,
+        groups: List[DuplicateGroup],
+        dry_run: bool = False,
+        progress_cb: Optional[ProgressCallback] = None,
+    ) -> HardlinkDedupeSummary:
+        """
+        将 DuplicateGroup 中的副本文件原子替换为指向 master_path 的 NTFS 硬链接：
+        先将副本重命名为 `.hl_bak` -> 调用 `os.link(master_path, dup_path)` -> 校验 inode 一致后删除 `.hl_bak`。
+        若失败立即将 `.hl_bak` 还原，确保聊天记录中的文件 100% 可正常点开！
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def relocate_known_folder(
+        self,
+        item: KnownFolderItem,
+        target_path: str,
+        move_existing_files: bool = True,
+        progress_cb: Optional[ProgressCallback] = None,
+    ) -> KnownFolderItem:
+        """
+        调用 Windows Shell32 `SHSetKnownFolderPath` 将下载/桌面/文档等系统文件夹原生改绑至 D/E/F 盘，
+        并将原目录下的文件安全平滑迁移至新目录。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def slim_winsxs_component_store(
+        self,
+        progress_cb: Optional[ProgressCallback] = None,
+    ) -> Tuple[bool, str]:
+        """执行 `Dism.exe /Online /Cleanup-Image /StartComponentCleanup` 安全清理过期的系统更新备份包"""
         raise NotImplementedError
